@@ -112,7 +112,10 @@
       "class_path": "deeptutor.tools.builtin:AskUserTool",
       "order": 23
     },
-    "geogebra_analysis": {
+    "describe_image": {
+      "class_path": "deeptutor.tools.describe_image_tool:DescribeImageTool",
+      "order": 30
+    },    "geogebra_analysis": {
       "class_path": "deeptutor.tools.builtin:GeoGebraAnalysisTool",
       "order": 25
     },

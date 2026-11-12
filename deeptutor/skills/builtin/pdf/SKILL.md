@@ -25,6 +25,47 @@ relative filename. Follow the turn's **User workspace** instructions for
 locating inputs, output boundaries, and presenting the finished file.
 Preserve an explicitly requested quantity (such as 500 words) and verify the count in the output before finishing. If execution fails or the artifact is missing, diagnose stderr/root cause and change strategy; do not retry identical code or reduce the requested scope without asking.
 
+## Where to save, and how to deliver the file
+
+**The `exec` working directory is already the servable output directory.** Every
+`exec` call starts in `data/user/workspace/chat/chat/<turn>/exec`, which the
+server serves - so `canvas.save("out.pdf")` lands the file where the user can reach it
+*and* makes it downloadable. Six rules:
+
+1. **Save with a bare filename.** `canvas.save("out.pdf")` and you are done.
+2. **Never build a path from `DEEPTUTOR_WORKSPACE_ROOT`.** It points at
+   `data/user`, which is *not* servable (the `workspace/` level is missing):
+   files written there save fine and still 404 on download.
+3. **An explicit path must stay under the cwd and keep the `exec` kind
+   segment.** The server serves the turn's own output directory -
+   `workspace/chat/chat/<turn>/exec/...` or
+   `workspace/outputs/chat/<session>/<turn>/exec/...` - and nothing else, so
+   `<cwd>/subdir/out.pdf` is safe while an absolute path built elsewhere is not.
+4. **Create the directory before saving.** `save()` never creates directories,
+   so saving into a missing one raises `FileNotFoundError: [Errno 2]`. Make it
+   first: `Path("subdir").mkdir(parents=True, exist_ok=True)` (or `os.makedirs`).
+5. **Deliver with `workspace_present`.** Call it with the file's
+   workspace-relative path and use the relative path it returns, copied
+   exactly, in your Markdown link. The served prefix is `/files/outputs/<path>`;
+   never hand-write `/chat/outputs/...` - a hand-assembled link 404s even when
+   the file is correct.
+6. **Verify before presenting.** If a download 404s, the fix is the **path**,
+   not the file: check the file exists and that its path matches a served shape.
+
+```python
+# WRONG - DEEPTUTOR_WORKSPACE_ROOT is data/user: the file exists but 404s
+import os
+out = os.environ["DEEPTUTOR_WORKSPACE_ROOT"] + "/chat/unified_x/turn_y"
+canvas.save(out + "/out.pdf")
+# RIGHT - bare filename in the current (servable) working directory
+canvas.save("out.pdf")
+# RIGHT - explicit path under the cwd, with the directory created first
+from pathlib import Path
+sub = Path("deliverables")
+sub.mkdir(parents=True, exist_ok=True)
+canvas.save(sub / "out.pdf")
+```
+
 ## Extract text and tables (pdfplumber)
 
 ```python
@@ -73,9 +114,32 @@ page.extract_tables(ts)
 
 For very large PDFs where you only need raw text, `pypdf`'s `page.extract_text()` is lighter.
 
-## Scanned / image-only PDFs (be honest)
+## Scanned / image-only PDFs and images (OCR is installed)
 
-If `extract_text()` returns empty or garbage (e.g. `(cid:NN)` runs) the page is scanned. **No OCR engine (tesseract) is installed and network is off**, so you cannot recover that text. Say so plainly and stop — do not fabricate content or attempt `pip install`.
+If `extract_text()` returns empty or garbage (e.g. `(cid:NN)` runs) the page is
+scanned, or the input is an image (.png/.jpg/.tif). OCR **is** installed here —
+RapidOCR (`rapidocr-onnxruntime`, CPU ONNX), wired into PyMuPDF4LLM. Run it with
+a plain `python`: inside the `exec` sandbox the venv's `Scripts` directory already
+leads `PATH`, so bare `python` **is** the venv interpreter and the OCR packages
+are importable. Do not hard-code an absolute interpreter path.
+
+```python
+import subprocess, sys, textwrap
+
+# inside the exec sandbox, bare `python` IS the venv interpreter
+code = textwrap.dedent('''
+    import sys, pymupdf4llm
+    print(pymupdf4llm.to_markdown(sys.argv[1]))
+''')
+result = subprocess.run(
+    ["python", "-c", code, "scanned.pdf"], capture_output=True, text=True, encoding="utf-8"
+)
+print(result.stdout or result.stderr)
+```
+
+Standalone images work the same way (`sys.argv[1] = "page.png"`). The call above is exactly what DeepTutor's document parser runs, so OCR sees image pixels and scans; expect `Using RapidOCR for OCR processing.` on stderr and a trailing OCR word or two to be slightly misread (occasional extra/replaced character — normal, not a failure). Report recovered text as-is; never fabricate it.
+
+Only if both the import and the subprocess above fail, say plainly that OCR failed for this file and stop — do not attempt `pip install`.
 
 ## Merge / split / rotate / crop / metadata (pypdf)
 
@@ -276,4 +340,4 @@ for i, page in enumerate(doc, 1):
     page.get_pixmap(dpi=150).save(f"page_{i}.png")  # higher dpi = sharper + larger
 ```
 
-`fitz` also extracts text (`page.get_text()`) and can render a sub-region via `page.get_pixmap(clip=fitz.Rect(x0, y0, x1, y1))`. It does **not** OCR — a rendered scanned page is still just pixels (see Scanned PDFs above).
+`fitz` also extracts text (`page.get_text()`) and can render a sub-region via `page.get_pixmap(clip=fitz.Rect(x0, y0, x1, y1))`. It does **not** OCR by itself — render with `get_pixmap` and then run the OCR path in the Scanned PDFs section above; a rendered scanned page is otherwise just pixels.

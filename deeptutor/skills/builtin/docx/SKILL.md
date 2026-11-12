@@ -28,6 +28,47 @@ turn's **User workspace** instructions for locating inputs, output boundaries,
 and presenting the finished file. When editing, write a new output unless the
 user explicitly requested an authorized replacement.
 
+## Where to save, and how to deliver the file
+
+**The `exec` working directory is already the servable output directory.** Every
+`exec` call starts in `data/user/workspace/chat/chat/<turn>/exec`, which the
+server serves - so `doc.save("out.docx")` lands the file where the user can reach it
+*and* makes it downloadable. Six rules:
+
+1. **Save with a bare filename.** `doc.save("out.docx")` and you are done.
+2. **Never build a path from `DEEPTUTOR_WORKSPACE_ROOT`.** It points at
+   `data/user`, which is *not* servable (the `workspace/` level is missing):
+   files written there save fine and still 404 on download.
+3. **An explicit path must stay under the cwd and keep the `exec` kind
+   segment.** The server serves the turn's own output directory -
+   `workspace/chat/chat/<turn>/exec/...` or
+   `workspace/outputs/chat/<session>/<turn>/exec/...` - and nothing else, so
+   `<cwd>/subdir/out.docx` is safe while an absolute path built elsewhere is not.
+4. **Create the directory before saving.** `save()` never creates directories,
+   so saving into a missing one raises `FileNotFoundError: [Errno 2]`. Make it
+   first: `Path("subdir").mkdir(parents=True, exist_ok=True)` (or `os.makedirs`).
+5. **Deliver with `workspace_present`.** Call it with the file's
+   workspace-relative path and use the relative path it returns, copied
+   exactly, in your Markdown link. The served prefix is `/files/outputs/<path>`;
+   never hand-write `/chat/outputs/...` - a hand-assembled link 404s even when
+   the file is correct.
+6. **Verify before presenting.** If a download 404s, the fix is the **path**,
+   not the file: check the file exists and that its path matches a served shape.
+
+```python
+# WRONG - DEEPTUTOR_WORKSPACE_ROOT is data/user: the file exists but 404s
+import os
+out = os.environ["DEEPTUTOR_WORKSPACE_ROOT"] + "/chat/unified_x/turn_y"
+doc.save(out + "/out.docx")
+# RIGHT - bare filename in the current (servable) working directory
+doc.save("out.docx")
+# RIGHT - explicit path under the cwd, with the directory created first
+from pathlib import Path
+sub = Path("deliverables")
+sub.mkdir(parents=True, exist_ok=True)
+doc.save(sub / "out.docx")
+```
+
 ## Read / extract
 
 ```python

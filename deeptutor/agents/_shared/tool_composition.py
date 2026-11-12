@@ -81,6 +81,10 @@ WORKSPACE_BASELINE_TOOLS: tuple[str, ...] = (
     "workspace_present",
     "write_note",
     "search_notes",
+    # Reading an image is part of working with the user's content, not an
+    # optional enhancement: a page whose text is only in a pasted picture
+    # cannot be answered without it.
+    "describe_image",
 )
 
 

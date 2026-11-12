@@ -27,6 +27,47 @@ workbooks, number formats, and streaming large sheets. It is declared by every
 supported DeepTutor installation. Do not assume pandas is installed: it exists
 in the Docker runner but is not a direct dependency of every pip/source install.
 
+## Where to save, and how to deliver the file
+
+**The `exec` working directory is already the servable output directory.** Every
+`exec` call starts in `data/user/workspace/chat/chat/<turn>/exec`, which the
+server serves - so `wb.save("out.xlsx")` lands the file where the user can reach it
+*and* makes it downloadable. Six rules:
+
+1. **Save with a bare filename.** `wb.save("out.xlsx")` and you are done.
+2. **Never build a path from `DEEPTUTOR_WORKSPACE_ROOT`.** It points at
+   `data/user`, which is *not* servable (the `workspace/` level is missing):
+   files written there save fine and still 404 on download.
+3. **An explicit path must stay under the cwd and keep the `exec` kind
+   segment.** The server serves the turn's own output directory -
+   `workspace/chat/chat/<turn>/exec/...` or
+   `workspace/outputs/chat/<session>/<turn>/exec/...` - and nothing else, so
+   `<cwd>/subdir/out.xlsx` is safe while an absolute path built elsewhere is not.
+4. **Create the directory before saving.** `save()` never creates directories,
+   so saving into a missing one raises `FileNotFoundError: [Errno 2]`. Make it
+   first: `Path("subdir").mkdir(parents=True, exist_ok=True)` (or `os.makedirs`).
+5. **Deliver with `workspace_present`.** Call it with the file's
+   workspace-relative path and use the relative path it returns, copied
+   exactly, in your Markdown link. The served prefix is `/files/outputs/<path>`;
+   never hand-write `/chat/outputs/...` - a hand-assembled link 404s even when
+   the file is correct.
+6. **Verify before presenting.** If a download 404s, the fix is the **path**,
+   not the file: check the file exists and that its path matches a served shape.
+
+```python
+# WRONG - DEEPTUTOR_WORKSPACE_ROOT is data/user: the file exists but 404s
+import os
+out = os.environ["DEEPTUTOR_WORKSPACE_ROOT"] + "/chat/unified_x/turn_y"
+wb.save(out + "/out.xlsx")
+# RIGHT - bare filename in the current (servable) working directory
+wb.save("out.xlsx")
+# RIGHT - explicit path under the cwd, with the directory created first
+from pathlib import Path
+sub = Path("deliverables")
+sub.mkdir(parents=True, exist_ok=True)
+wb.save(sub / "out.xlsx")
+```
+
 ## THE critical gotcha: openpyxl writes formulas but never computes them
 
 `ws["B10"] = "=SUM(B2:B9)"` stores the formula *string*. openpyxl has no formula

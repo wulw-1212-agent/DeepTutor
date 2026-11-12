@@ -33,6 +33,61 @@ _DEFAULT_TIMEOUT = 30
 _MAX_TIMEOUT = 300
 
 
+def _snapshot_public_root(public_root: Path) -> dict[str, tuple[int, int]]:
+    """Capture a cheap signature of every visible file under the public root.
+
+    Used to spot files a model wrote outside its working directory - the
+    common case being a path built from ``DEEPTUTOR_WORKSPACE_ROOT``, which
+    lands in ``data/user`` and is therefore not servable by the server.
+    """
+
+    from deeptutor.services.sandbox.artifact_diagnostics import _snapshot_files
+
+    return _snapshot_files(public_root)
+
+
+def _collect_artifact_diagnostics(
+    *,
+    result: Any,
+    workdir: str,
+    public_root: Path,
+    public_root_before: dict[str, tuple[int, int]],
+) -> list[Any]:
+    """Return diagnostics for artifacts this call made undeliverable.
+
+    Two shapes are reported: a file written outside the working directory to
+    a path the server refuses to serve, and a "saved ..." claim in the output
+    whose file does not exist. Neither changes the turn's status; both only
+    explain what the model did wrong while it can still act on it.
+    """
+
+    from deeptutor.services.sandbox.artifact_diagnostics import (
+        find_missing_claimed_files,
+        find_unservable_writes,
+        _snapshot_files,
+    )
+
+    try:
+        public_root_after = _snapshot_files(public_root)
+        diagnostics = find_unservable_writes(
+            workdir=workdir,
+            public_root=public_root,
+            before=public_root_before,
+            after=public_root_after,
+        )
+        output = ""
+        try:
+            output = str(result.render(10_000_000) or "")
+        except Exception:  # noqa: BLE001 - diagnostics must never break a call
+            output = ""
+        diagnostics.extend(
+            find_missing_claimed_files(output=output, workdir=workdir)
+        )
+        return diagnostics
+    except Exception:  # noqa: BLE001 - diagnostics are best-effort
+        return []
+
+
 class ExecTool(BaseTool):
     """Run source code or a shell script through one sandbox contract."""
 
@@ -234,15 +289,17 @@ class ExecTool(BaseTool):
             kwargs.get("_sandbox_code_workdir") or kwargs.get("_sandbox_workdir") or ""
         ).strip()
         mounts = tuple(kwargs.get("_sandbox_mounts") or ())
-        if not workdir:
-            from deeptutor.services.path_service import get_path_service
+        from deeptutor.services.path_service import get_path_service
 
+        if not workdir:
             workdir = str(get_path_service().get_exec_workspace_dir())
             mounts = (Mount(host_path=workdir, sandbox_path=workdir, read_only=False),)
 
         stable_dir = Path(workdir)
         stable_dir.mkdir(parents=True, exist_ok=True)
         artifact_snapshot = snapshot_public_artifact_files(stable_dir)
+        public_root = Path(get_path_service().get_public_outputs_root()).expanduser().resolve()
+        public_root_before = _snapshot_public_root(public_root)
         source_name, _command_template = self._LANGUAGES[language]
         source_root_raw = str(kwargs.get("_sandbox_source_dir") or "").strip()
         if source_root_raw:
@@ -281,11 +338,18 @@ class ExecTool(BaseTool):
 
         from deeptutor.services.workspace.execution import logical_workspace_path
 
+        diagnostics = _collect_artifact_diagnostics(
+            result=result,
+            workdir=str(stable_dir),
+            public_root=public_root,
+            public_root_before=public_root_before,
+        )
         return self._render_result(
             result=result,
             limits=limits,
             artifact_dir=str(stable_dir),
             artifact_snapshot=artifact_snapshot,
+            artifact_diagnostics=diagnostics,
             kwargs=kwargs,
             metadata={
                 "language": language,
@@ -305,6 +369,7 @@ class ExecTool(BaseTool):
         artifact_dir: str,
         kwargs: dict[str, Any],
         artifact_snapshot: dict[str, tuple[int, int, int]] | None = None,
+        artifact_diagnostics: list[Any] | None = None,
         ignored_files: set[str] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> ToolResult:
@@ -337,6 +402,14 @@ class ExecTool(BaseTool):
             return logicalize_workspace_text(rendered, internal_root)
 
         content_parts = [_logicalize(result.render(limits.max_output_chars))]
+        if artifact_diagnostics:
+            from deeptutor.services.sandbox.artifact_diagnostics import (
+                render_artifact_diagnostics,
+            )
+
+            rendered = render_artifact_diagnostics(artifact_diagnostics)
+            if rendered:
+                content_parts.append(rendered)
         artifact_text = render_artifacts_for_tool(
             artifacts,
             already_presented=not bool(workspace_id),
